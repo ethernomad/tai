@@ -32,6 +32,8 @@ Always try to refactor when implementing new features. Look for opportunities to
 
 When making changes, ensure [ARCHITECTURE.md](./ARCHITECTURE.md) and [README.md](./README.md) are kept up to date. If a change affects the architectural decisions, module structure, data flow, or any other documented aspect, update the files accordingly.
 
+Every non-trivial change (new features, fixes, refactors, dependency updates, behavior changes — anything a reviewer would mention in a commit summary) must also get an entry in [CHANGELOG.md](./CHANGELOG.md) under the `## [Unreleased]` section, using the Keep a Changelog categories (`Added` / `Changed` / `Fixed` / etc.). Only trivial changes (typo fixes, comment-only edits, test-only tweaks) may skip it. Release tooling promotes that section at tag time — see [RELEASE.md](./RELEASE.md).
+
 ## Test Discipline
 
 - **Unit tests** (in <code>src/</code> <code>#[cfg(test)]</code> modules) must never use time-based waits (`sleep`, `delay_for`, etc.). Use deterministic patterns only.

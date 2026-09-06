@@ -513,20 +513,87 @@ jobs:
           cd ios && xcodegen generate
 
       - name: Link the app (simulator SDK, Debug)
-        # The phase 0b link: consumes target/ios/aarch64-apple-ios/debug/
+        # The phase 0b link: consumes target/ios/$(PLATFORM_NAME)/debug/
         # (project.yml's LIBRARY_SEARCH_PATHS). A failure here is the
         # actionable signal — the undefined symbols name the framework/flag
         # to add to project.yml's OTHER_LDFLAGS.
         # Destination: resolved dynamically (runner images cycle device names,
         # so a hardcoded "iPhone 16" would rot); grab the first available
-        # simulator UDID instead.
+        # simulator UDID instead. The built .app lands in DerivedData, so its
+        # path is located from the build settings (TARGET_BUILD_DIR), not
+        # hardcoded.
         run: |
           set -o pipefail
           DEST="$(xcrun simctl list devices available | grep -m1 -oE '[A-F0-9-]{36}')"
           [ -n "$DEST" ] || { echo "error: no available simulator found" >&2; exit 1; }
+          echo "DEST=$DEST" >> "$GITHUB_ENV"
           xcodebuild -project ios/Choreographr.xcodeproj -scheme Choreographr \
             -configuration Debug -sdk iphonesimulator -destination "id=$DEST" \
             build CODE_SIGNING_ALLOWED=NO
+          # The .app lands in DerivedData; locate it from the build settings
+          # (TARGET_BUILD_DIR is only dumped by -showBuildSettings, not by
+          # `build`). -showBuildSettings must use the same destination or it
+          # reports the default-simulator variant of the paths.
+          APP_DIR="$(xcodebuild -project ios/Choreographr.xcodeproj \
+            -scheme Choreographr -configuration Debug -sdk iphonesimulator \
+            -destination "id=$DEST" -showBuildSettings 2>/dev/null \
+            | grep -m1 ' TARGET_BUILD_DIR = ' | sed 's/.*TARGET_BUILD_DIR = //')"
+          [ -n "$APP_DIR" ] || { echo "error: could not resolve TARGET_BUILD_DIR" >&2; exit 1; }
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+
+      - name: "Smoke: boot the app in the simulator"
+        # Phase 0b runtime check — the LAST unverified link in the iOS chain:
+        # whether main.m's UIApplication → didFinishLaunching →
+        # choreo_gui_ios_main → dioxus::launch → winit's iOS event-loop wiring
+        # actually boots (blitz-shell 0.2 has no set_ios_app slot like
+        # set_android_app, so this wiring is a design assumption, not a
+        # verified fact).
+        #
+        # PASS criterion for the stub is deliberately LOW BAR: the process is
+        # ALIVE after 30s. Expected behavior: the app dials TcpPinned
+        # (127.0.0.1:9443), the connect fails on the runner (no daemon), and
+        # the channel-based UI keeps running showing the error status —
+        # "connect failed but UI alive" is the design working. A crash or
+        # hang (exit/absent process) is the phase 0b failure signal.
+        # continue-on-error: the destination/simulator plumbing on CI is
+        # itself unproven (headless boot quirks); promote to a hard gate
+        # after it has proven stable.
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          APP="$APP_DIR/choreo-gui.app"
+          [ -d "$APP" ] || { echo "error: built app not found at $APP" >&2; ls "$APP_DIR" >&2 || true; exit 1; }
+          xcrun simctl boot "$DEST" 2>/dev/null || true  # already booted is fine
+          xcrun simctl bootstatus "$DEST" -b
+          xcrun simctl install "$DEST" "$APP"
+          # --console-pty mirrors the app's stdout/stderr into this job log:
+          # dioxus-logger's tracing output (including the TCP failure status)
+          # is visible here when diagnosing a hang.
+          xcrun simctl launch --console-pty "$DEST" com.choreographr.gui \
+            > /tmp/app-console.log 2>&1 &
+          LAUNCH_PID=$!
+          # Poll: the process must still exist inside the sim after 30s.
+          alive=0
+          for i in $(seq 1 30); do
+            sleep 1
+            if ! xcrun simctl spawn "$DEST" launchctl list 2>/dev/null \
+                | grep -q com.choreographr.gui; then
+              echo "app process disappeared from the simulator at t=${i}s" >&2
+              echo "--- app console so far: ---" >&2
+              cat /tmp/app-console.log >&2 || true
+              break
+            fi
+            if [ "$i" = 30 ]; then alive=1; fi
+          done
+          if [ "$alive" = 1 ]; then
+            echo "SMOKE PASS: app alive after 30s (stub expected: TCP connect failure shown in UI)"
+            echo "--- app console: ---"
+            cat /tmp/app-console.log || true
+            xcrun simctl terminate "$DEST" com.choreographr.gui 2>/dev/null || true
+          else
+            echo "SMOKE FAIL: app did not stay alive — phase 0b wiring needs a real Mac session to debug" >&2
+            exit 1
+          fi
 
   release:
     name: create GitHub release

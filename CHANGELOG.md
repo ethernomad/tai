@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   AVIF behind a feature gate; image decoding consolidated into the new
   `choreo-image` crate.
 - `retrieve_webpage` tool rendering pages with a local headless browser,
-  with true full-page capture and `file://` URL support.
+  with true full-page capture, correct element-scoped screenshots (below-the-fold
+  elements now render instead of blank background), and `file://` URL support.
 - `session_inspect` read-only diagnostic tool (debug tool group).
 - Web-fetch fallback order documented in the default system prompt;
   brotli response decompression in `ureq`.

@@ -226,6 +226,43 @@ fn page_content_size(tab: &Tab) -> Result<(f64, f64), ToolExecError> {
     Ok((w, h))
 }
 
+/// JS that measures an element's bounding box in **document space** (bounding
+/// client rect plus current scroll offsets), returned as a `"x,y,w,h"` string.
+/// A string (not an array/object) on purpose: the crate's `evaluate`
+/// hard-codes `returnByValue: false`, which yields `.value` only for
+/// primitives — see `PAGE_SIZE_JS` for the same rationale.
+const ELEMENT_BOX_JS_TEMPLATE: &str = "(() => { const e = document.querySelector({sel}); if (!e) return ''; \
+     const r = e.getBoundingClientRect(); \
+     return (r.left + window.scrollX) + ',' + (r.top + window.scrollY) + ',' + r.width + ',' + r.height; })()";
+
+/// Measure `selector`'s bounding box in document-space coordinates
+/// (`(x, y, width, height)`). Returns `None` when the selector matches nothing
+/// (the caller turns that into a user-facing "selector not found" error).
+fn element_document_box(
+    tab: &Tab,
+    selector: &str,
+) -> Result<Option<(f64, f64, f64, f64)>, ToolExecError> {
+    let sel = serde_json::to_string(selector)
+        .map_err(|e| ToolExecError(format!("failed to encode selector: {e}")))?;
+    let expr = ELEMENT_BOX_JS_TEMPLATE.replace("{sel}", &sel);
+    let obj = tab
+        .evaluate(&expr, false)
+        .map_err(|e| ToolExecError(format!("failed to measure element box: {e:#}")))?;
+    let raw = remote_text(&obj);
+    let parsed: Option<(f64, f64, f64, f64)> = raw
+        .split(',')
+        .map(str::parse::<f64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
+        .and_then(|v| {
+            <[f64; 4]>::try_from(v)
+                .ok()
+                .map(|a| (a[0], a[1], a[2], a[3]))
+        });
+    debug!(raw = %raw, "measured element document box");
+    Ok(parsed)
+}
+
 /// Capture a screenshot of the whole visible viewport (or a single element, via
 /// `selector`). When `full_page`, this returns the entire scrollable page.
 ///
@@ -241,12 +278,42 @@ fn capture_screenshot(
     full_page: bool,
 ) -> Result<Vec<u8>, ToolExecError> {
     if let Some(sel) = selector {
-        let element = tab
-            .find_element(sel)
-            .map_err(|e| ToolExecError(format!("selector '{sel}' not found: {e:#}")))?;
-        return element
-            .capture_screenshot(CaptureScreenshotFormatOption::Png)
-            .map_err(|e| ToolExecError(format!("failed to screenshot element: {e:#}")));
+        // Element screenshots must NOT go through headless_chrome's
+        // `Element::capture_screenshot`: it clips against the *viewport* with
+        // `captureBeyondViewport` unset, so anything below the fold captures
+        // blank body background. Instead, take the element's box in document
+        // space and clip against it with `captureBeyondViewport: true` — the
+        // same trick the full-page path uses below, so off-screen elements
+        // render fully regardless of scroll position or sticky headers.
+        let Some((x, y, w, h)) = element_document_box(tab, sel)? else {
+            return Err(ToolExecError(format!(
+                "selector '{sel}' matched no element"
+            )));
+        };
+        if w <= 0.0 || h <= 0.0 {
+            return Err(ToolExecError(format!(
+                "selector '{sel}' matched an element with a zero-size box"
+            )));
+        }
+        let result = tab
+            .call_method(Page::CaptureScreenshot {
+                format: Some(CaptureScreenshotFormatOption::Png),
+                quality: None,
+                clip: Some(Page::Viewport {
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                    scale: 1.0,
+                }),
+                from_surface: Some(true),
+                capture_beyond_viewport: Some(true),
+                optimize_for_speed: None,
+            })
+            .map_err(|e| ToolExecError(format!("failed to screenshot element: {e:#}")))?;
+        return BASE64
+            .decode(result.data)
+            .map_err(|e| ToolExecError(format!("element screenshot decode failed: {e}")));
     }
 
     if full_page {

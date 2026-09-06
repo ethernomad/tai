@@ -12,8 +12,12 @@
 #     read those notes there too.
 #
 # Staging layout (matches ios/project.yml's LIBRARY_SEARCH_PATHS):
-#   target/ios/aarch64-apple-ios/<profile>/      libchoreo_gui.rlib + *.a
-#   target/ios/aarch64-apple-ios-sim/<profile>/  same, simulator slice
+#   target/ios/iphoneos/<profile>/        libchoreo_gui.a  (device slice)
+#   target/ios/iphonesimulator/<profile>/ libchoreo_gui.a  (simulator slice)
+# Per-SDK because the two SDKs' object formats are incompatible — ld64
+# refuses to link a device-built archive into a simulator app (observed in
+# CI: "building for 'iOS-simulator', but linking in object file ... built
+# for 'iOS'"). project.yml resolves the directory via $(PLATFORM_NAME).
 #
 # Prerequisites (Mac): rustup targets aarch64-apple-ios[ -sim], Xcode. Set
 # IOS_BUILD_STABLE=1 to build with the stable toolchain (CI mode — the
@@ -176,7 +180,13 @@ build_one() {
     run_cargo rustc -p choreo-gui --lib --crate-type staticlib --target "$triple" \
         "${profile_args[@]+"${profile_args[@]}"}" \
         || fail "build failed for $triple (see output above)"
-    stage="$STAGE_ROOT/$triple/$profile"
+    # Platform-named stage dir: Xcode's $(PLATFORM_NAME) is `iphoneos` or
+    # `iphonesimulator`, NOT the cargo triple (see the header comment).
+    case "$triple" in
+        *-sim) platform="iphonesimulator" ;;
+        *)     platform="iphoneos" ;;
+    esac
+    stage="$STAGE_ROOT/$platform/$profile"
     mkdir -p "$stage"
     # Clear the stage first: earlier script versions staged rlibs + separate
     # ring/secp archives; a stale mix would confuse the Xcode link.

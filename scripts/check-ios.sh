@@ -18,8 +18,8 @@
 #                      archive is created internally by rustc, so this needs no
 #                      Apple linker and runs on any host; the cdylib (which
 #                      would) is deliberately NOT built.
-#   3. artifacts     — the link inputs staged by scripts/build-ios.sh exist
-#                      and are sane (rlib + ring/secp256k1 archives).
+#   3. artifacts     — the link input staged by scripts/build-ios.sh exists
+#                      and is sane (self-contained libchoreo_gui.a).
 #
 # WHY THE SHIMS (non-Mac hosts; the full rationale lives in build-ios.sh):
 #   - ~/.cargo/config.toml [build] rustflags and the workspace's profile
@@ -170,7 +170,7 @@ fi
 # ── Stage 3: staged artifacts (from build-ios.sh) ───────────────────────────
 stage 3 "staged link inputs (scripts/build-ios.sh layout)"
 if [ "$reached" -ge 2 ]; then
-    stage_dir="target/ios/aarch64-apple-ios/debug"
+    stage_dir="target/ios/iphoneos/debug"
     if [ -e "$stage_dir/libchoreo_gui.a" ]; then
         pass "$stage_dir/libchoreo_gui.a (self-contained: std + ring + secp256k1 embedded)"
         reached=3

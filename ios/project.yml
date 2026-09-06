@@ -1,26 +1,24 @@
 # xcodegen project definition for the Choreographr GUI iOS app.
 #
 # Generates Choreographr.xcodeproj from this file + ios/Info.plist +
-# ios/main.m plus the Rust artifacts staged by scripts/build-ios.sh under
-# target/ios/aarch64-apple-ios/<profile>/ (libchoreo_gui.rlib plus the
-# native libs its build scripts produced: ring, secp256k1).
+# ios/main.m plus the SELF-CONTAINED Rust staticlib staged by
+# scripts/build-ios.sh under target/ios/$(PLATFORM_NAME)/<profile>/
+# (libchoreo_gui.a — std + ring + secp256k1 embedded).
 #
 # On a Mac:
-#   ./scripts/build-ios.sh            # build + stage (device target)
+#   ./scripts/build-ios.sh            # build + stage (device + simulator)
 #   brew install xcodegen
 #   cd ios && xcodegen generate
 #   open Choreographr.xcodeproj       # then run on simulator/device
 #
-# The rlib is linked directly rather than via a `staticlib` crate-type: the
-# Xcode "Other Linker" entry consumes it together with the C-compiled
-# static archives staged alongside (see build-ios.sh's STAGE layout). If the
-# Xcode link proves happier with a staticlib, add `staticlib` to choreo-gui's
-# crate-type list and switch LIBRARIES below — one-line change either way.
+# The staticlib is linked via `-lchoreo_gui` (ld64 searches lib*.a for -l;
+# it does NOT find .rlib — see build-ios.sh). The device vs simulator
+# object formats are INCOMPATIBLE (ld64: "built for 'iOS', but building for
+# 'iOS-simulator'"), hence the $(PLATFORM_NAME) stage split.
 #
-# PHASE 0B: unverified on a Mac — expect iteration on the framework list
-# (wgpu/Metal pulls QuartzCore/CoreGraphics/Metal; winit pulls UIKit/
-# Foundation) and on the deployment-target floor (winit requires iOS 10+;
-# 14.0 chosen conservatively for the local-network permission API).
+# PHASE 0B: the link is CI-verified (ios-build job); runtime boot still
+# needs a Mac/device — expect iteration on the event-loop wiring
+# (winit/blitz-shell iOS handshake, see ios/main.m) if launch misbehaves.
 
 name: Choreographr
 options:
@@ -39,21 +37,18 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.choreographr.gui
         PRODUCT_NAME: choreo-gui
-        # Rust artifacts staged by scripts/build-ios.sh (relative to ios/).
-        # Hardcoded `debug` (the script's default PROFILE), NOT $(CONFIGURATION):
-        # cargo's target dir is lowercase `debug` while Xcode's Debug config
-        # expands to `Debug` — the case mismatch would silently miss the lib
-        # search path. A release-configured app build must pass PROFILE=dist
-        # to build-ios.sh and point this at `dist` instead.
-        # The Rust staticlib (staged by build-ios.sh) is SELF-CONTAINED: it
-        # embeds std, ring, and secp256k1, so only `-lchoreo_gui` is needed
-        # here (linking the ring/secp archives separately would be redundant).
-        # -lobjc for the Rust ObjC bindings (objc2 family); the -framework
-        # list mirrors rustc's own link args for this dep tree (wgpu→Metal/
-        # QuartzCore/CoreGraphics, winit→UIKit/CoreFoundation, blitz→CoreText,
-        # security-framework→Security).
+        # Rust staticlib stage root — per-SDK via $(PLATFORM_NAME): Xcode
+        # expands it to `iphonesimulator`/`iphoneos` at build time, and the
+        # two SDKs have INCOMPATIBLE object formats (ld64 refuses to link a
+        # device-built archive into a simulator app: "building for
+        # 'iOS-simulator', but linking in object file ... built for 'iOS'").
+        # build-ios.sh stages into target/ios/<platform>/<profile>/.
+        # cargo's dir is lowercase `debug` (the script's default PROFILE),
+        # NOT $(CONFIGURATION)=`Debug` — the case mismatch would silently
+        # miss the lib search path. A release-configured app build must pass
+        # PROFILE=dist to build-ios.sh and point this at `dist` instead.
         LIBRARY_SEARCH_PATHS:
-          - "$(SRCROOT)/../target/ios/aarch64-apple-ios/debug"
+          - "$(SRCROOT)/../target/ios/$(PLATFORM_NAME)/debug"
         OTHER_LDFLAGS:
           - -lchoreo_gui
           - -lobjc

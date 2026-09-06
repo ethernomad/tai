@@ -45,15 +45,33 @@ targets:
         # expands to `Debug` — the case mismatch would silently miss the lib
         # search path. A release-configured app build must pass PROFILE=dist
         # to build-ios.sh and point this at `dist` instead.
+        # The Rust staticlib (staged by build-ios.sh) is SELF-CONTAINED: it
+        # embeds std, ring, and secp256k1, so only `-lchoreo_gui` is needed
+        # here (linking the ring/secp archives separately would be redundant).
+        # -lobjc for the Rust ObjC bindings (objc2 family); the -framework
+        # list mirrors rustc's own link args for this dep tree (wgpu→Metal/
+        # QuartzCore/CoreGraphics, winit→UIKit/CoreFoundation, blitz→CoreText,
+        # security-framework→Security).
         LIBRARY_SEARCH_PATHS:
           - "$(SRCROOT)/../target/ios/aarch64-apple-ios/debug"
         OTHER_LDFLAGS:
           - -lchoreo_gui
-          - -lring_core_0_17_14_
-          - -lsecp256k1
           - -lobjc
-        # wgpu/Metal + winit/UIKit framework surface; extend if the Xcode link
-        # reports missing symbols (phase 0b).
-        OTHER_LDFLAGS_2: []
+          - -framework
+          - Metal
+          - -framework
+          - QuartzCore
+          - -framework
+          - CoreGraphics
+          - -framework
+          - CoreText
+          - -framework
+          - CoreFoundation
+          - -framework
+          - Foundation
+          - -framework
+          - UIKit
+          - -framework
+          - Security
         CLANG_ENABLE_MODULES: YES
         SWIFT_VERSION: "5.0"

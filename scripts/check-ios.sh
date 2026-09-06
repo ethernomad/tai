@@ -12,9 +12,12 @@
 #                      (+ the -sim target): the whole Blitz/wgpu/winit tree
 #                      type-checks for iOS. THE gate; everything below is
 #                      extra credit.
-#   2. codegen       — `cargo rustc --crate-type lib` (rlib only — the cdylib
-#                      needs Apple's linker and is deliberately NOT attempted;
-#                      see build-ios.sh) producing a real aarch64 Mach-O rlib.
+#   2. codegen       — `cargo rustc --crate-type staticlib`: a self-contained
+#                      real .a (the link input Xcode/ld64 consumes — ld64 does
+#                      NOT find `.rlib` for -l<name>; see build-ios.sh). The
+#                      archive is created internally by rustc, so this needs no
+#                      Apple linker and runs on any host; the cdylib (which
+#                      would) is deliberately NOT built.
 #   3. artifacts     — the link inputs staged by scripts/build-ios.sh exist
 #                      and are sane (rlib + ring/secp256k1 archives).
 #
@@ -146,20 +149,18 @@ for target in aarch64-apple-ios aarch64-apple-ios-sim; do
 done
 
 # ── Stage 2: codegen (rlib) ─────────────────────────────────────────────────
-stage 2 "rlib codegen — cargo rustc --crate-type lib"
+stage 2 "staticlib codegen — cargo rustc --crate-type staticlib"
 if [ "$reached" -ge 1 ]; then
-    if cargo rustc -p choreo-gui --lib --crate-type lib --target aarch64-apple-ios 2>&1 \
+    if cargo rustc -p choreo-gui --lib --crate-type staticlib --target aarch64-apple-ios 2>&1 \
         | tee /tmp/check-ios-codegen.log | grep -q "^error"; then
-        # The expected failure here would be the cdylib link — but
-        # --crate-type lib must prevent that; anything failing is a finding.
-        bail "rlib codegen failed — see /tmp/check-ios-codegen.log (unexpected: this stage needs no Apple linker)"
+        bail "staticlib codegen failed — see /tmp/check-ios-codegen.log (unexpected: archive creation needs no Apple linker)"
     else
-        rlib="target/aarch64-apple-ios/debug/libchoreo_gui.rlib"
-        if [ -e "$rlib" ]; then
-            pass "rlib produced: $rlib ($(du -h "$rlib" | cut -f1), $(file -b "$rlib" | cut -d, -f1))"
+        alib="target/aarch64-apple-ios/debug/libchoreo_gui.a"
+        if [ -e "$alib" ]; then
+            pass "staticlib produced: $alib ($(du -h "$alib" | cut -f1), $(file -b "$alib" | cut -d, -f1))"
             reached=2
         else
-            bail "cargo rustc succeeded but $rlib missing"
+            bail "cargo rustc succeeded but $alib missing"
         fi
     fi
 else
@@ -170,15 +171,9 @@ fi
 stage 3 "staged link inputs (scripts/build-ios.sh layout)"
 if [ "$reached" -ge 2 ]; then
     stage_dir="target/ios/aarch64-apple-ios/debug"
-    if [ -e "$stage_dir/libchoreo_gui.rlib" ]; then
-        pass "$stage_dir/libchoreo_gui.rlib"
-        n=$(find "$stage_dir" -name '*.a' | wc -l)
-        if [ "$n" -ge 2 ]; then
-            pass "$n C static archive(s) staged (ring, secp256k1)"
-            reached=3
-        else
-            warn "only $n static archive(s) staged — re-run scripts/build-ios.sh to refresh"
-        fi
+    if [ -e "$stage_dir/libchoreo_gui.a" ]; then
+        pass "$stage_dir/libchoreo_gui.a (self-contained: std + ring + secp256k1 embedded)"
+        reached=3
     else
         warn "$stage_dir not populated — run scripts/build-ios.sh to stage link inputs"
     fi

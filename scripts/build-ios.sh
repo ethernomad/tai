@@ -163,35 +163,37 @@ build_one() {
     profile_args=(); [ "$profile" != debug ] && profile_args=(--profile "$profile")
     out="target/$triple/$profile"
     log "building choreo-gui (lib) for $triple ($profile)"
-    # cargo rustc --crate-type lib (NOT `cargo build --lib`): the crate also
-    # declares a `cdylib` target (for the Android .so scaffold), and `--lib`
-    # builds ALL lib crate-types — the cdylib requires Apple's linker, which
-    # is exactly the step this script must NOT attempt on a non-Mac host.
-    # Restricting the crate-type to `lib` (the rlib) makes the build end at
-    # codegen, which needs no external linker.
-    run_cargo rustc -p choreo-gui --lib --crate-type lib --target "$triple" \
+    # cargo rustc --crate-type staticlib: the link input Xcode consumes.
+    # WHY NOT the rlib (the earlier approach): Apple's ld64 searches
+    # `lib<name>.{dylib,tbd,a}` for `-l<name>` and does NOT look for `.rlib`,
+    # so the first CI app-link failed with "library 'choreo_gui' not found".
+    # A staticlib is a real `.a` — and crucially it can be produced on ANY
+    # host: archive creation is internal to rustc (it pulls in std, the C
+    # deps ring/secp256k1, and everything else itself), so no Apple linker is
+    # needed on the Linux laptop path either. (NOT --crate-type lib either:
+    # the crate's `cdylib` target would also build under `--lib` and the
+    # cdylib DOES need Apple's linker.)
+    run_cargo rustc -p choreo-gui --lib --crate-type staticlib --target "$triple" \
         "${profile_args[@]+"${profile_args[@]}"}" \
         || fail "build failed for $triple (see output above)"
     stage="$STAGE_ROOT/$triple/$profile"
     mkdir -p "$stage"
-    # The rlib: the artifact the Xcode scaffold links (-lchoreo_gui via
-    # -L). `cargo rustc` stages it at $out/libchoreo_gui.rlib (single
-    # crate-type); keep the deps/ glob fallback for a future `cargo build`.
-    rlib="$out/libchoreo_gui.rlib"
-    [ -e "$rlib" ] || rlib="$(ls -1 "$out/deps"/libchoreo_gui-*.rlib 2>/dev/null | head -n1 || true)"
-    [ -n "$rlib" ] && [ -e "$rlib" ] || fail "no libchoreo_gui rlib produced under $out"
-    cp "$rlib" "$stage/libchoreo_gui.rlib"
-    # C static archives the rlib depends on (ring, secp256k1) so the Mac link
-    # has everything in one directory — cc-rs leaves them in its out/ dirs.
-    # Layout note: nightly (share-generics) nests them under build/<crate>/<hash>/,
-    # stable under build/<crate>-<hash>/ — match by name across both.
-    find "$out/build" \( -path '*ring*' -o -path '*secp256k1*' \) -name '*.a' \
-        -exec cp {} "$stage/" \; 2>/dev/null || true
-    # The link inputs are the whole point of staging — a missing archive would
-    # only surface as an opaque undefined-symbol error on the Mac, so fail here.
-    [ -e "$stage/libring_core_0_17_14_.a" ] || fail "ring static archive not staged under $stage"
-    [ -e "$stage/libsecp256k1.a" ] || fail "secp256k1 static archive not staged under $stage"
-    log "staged $stage"
+    # Clear the stage first: earlier script versions staged rlibs + separate
+    # ring/secp archives; a stale mix would confuse the Xcode link.
+    rm -f "$stage"/* 2>/dev/null || true
+    # The staticlib: the artifact the Xcode scaffold links (-lchoreo_gui
+    # via -L). `cargo rustc` stages it at $out/libchoreo_gui.a; keep the
+    # deps/ glob fallback for a future `cargo build` layout.
+    alib="$out/libchoreo_gui.a"
+    [ -e "$alib" ] || alib="$(ls -1 "$out/deps"/libchoreo_gui-*.a 2>/dev/null | head -n1 || true)"
+    [ -n "$alib" ] && [ -e "$alib" ] || fail "no libchoreo_gui.a produced under $out"
+    cp "$alib" "$stage/libchoreo_gui.a"
+    # The link input is the whole point of staging — verify it is a real
+    # ar archive so a truncated/corrupt artifact fails HERE, not as an
+    # opaque ld error on the Mac.
+    file -b "$stage/libchoreo_gui.a" | grep -q "ar archive" \
+        || fail "$stage/libchoreo_gui.a is not an ar archive"
+    log "staged $stage ($(du -h "$stage/libchoreo_gui.a" | cut -f1))"
 }
 
 # macOS detection: full build possible only when xcrun (⇒ Xcode) is present.

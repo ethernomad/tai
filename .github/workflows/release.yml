@@ -623,6 +623,29 @@ jobs:
           # the complete release, exactly like release.sh's dist/ glob.
           ( cd dist && sha256sum choreographr-* > SHA256SUMS && cat SHA256SUMS )
 
+      - name: Extract the changelog section for this version
+        # The release body is the curated CHANGELOG.md section, not just the
+        # auto-generated commit list. Keep a Changelog flow (RELEASE.md Phase
+        # 1): the section was renamed from [Unreleased] to [X.Y.Z] with the
+        # version bump, so it is committed at this exact tag. If it is
+        # missing, fail loudly — a silent fallback to --generate-notes alone
+        # would ship releases whose curated notes silently rot.
+        run: |
+          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          # Everything from the "## [X.Y.Z]" heading up to (not including) the
+          # next "## " heading, heading stripped. The changelog is repo-root
+          # CHANGELOG.md (Keep a Changelog 1.1).
+          awk -v ver="$VERSION" '
+            $0 == "## [" ver "]" { found=1; next }
+            found && /^## /   { exit }
+            found             { print }
+          ' CHANGELOG.md > /tmp/release-notes.md
+          if [ ! -s /tmp/release-notes.md ]; then
+              echo "error: CHANGELOG.md has no '## [$VERSION]' section — run the Phase-1 changelog promotion step before tagging" >&2
+              exit 1
+          fi
+          cat /tmp/release-notes.md
+
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -638,5 +661,9 @@ jobs:
           # Assets are immutable once uploaded (RELEASE.md hotfix section): a
           # re-run after the release exists fails on create — delete and
           # re-create per the SOP rather than "fixing" this job.
+          # The body comes from CHANGELOG.md (extracted above); the
+          # auto-generated notes are appended after it.
           gh release create "v${VERSION}" dist/* \
-              --title "choreographr ${VERSION}" --generate-notes
+              --title "choreographr ${VERSION}" \
+              --notes-file /tmp/release-notes.md \
+              --generate-notes

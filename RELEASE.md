@@ -8,29 +8,20 @@ A release ships three things:
 1. **14 crates to crates.io** (everything except `choreo-gui`, in dependency
    order) — enables `cargo install choreographr` / `cargo binstall`.
 2. **GitHub release `vX.Y.Z`** on `choreographr/choreographr` with prebuilt
-   artifacts (tarballs, `.deb`, `.rpm`, `SHA256SUMS`) — enables Homebrew,
+   artifacts (musl/macOS/Android tarballs, Windows `.zip`, desktop `.deb` +
+   `.rpm`, Termux-native `.deb`, combined `SHA256SUMS`) — enables Homebrew,
    AUR, `cargo binstall`, and the `choreographr.com` installer.
 3. **Channel updates** — Homebrew tap, AUR, choreographr.com.
 
-One release conductor drives all three. The binary artifacts for the four
-shipped platforms are now built **on GitHub Actions** by
-`.github/workflows/release.yml` (see [CI builds](#ci-builds-github-actions)):
-pushing the `vX.Y.Z` tag builds every platform and creates the GitHub release
-with the combined `SHA256SUMS`. The two-machine flow in this SOP remains the
-manual alternative/fallback — it covers what CI does not (all channel updates).
-
----
-
-## Build machines
-
-| Machine | What it builds | Notes |
-|---|---|---|
-| **Linux x86_64 box** | `x86_64-unknown-linux-musl` tarball (static, mimalloc), `.deb`, `.rpm` | Needs `cargo-zigbuild` (musl cross-build), optional `dpkg-deb` / `rpmbuild` |
-| **M1 MacBook** | `aarch64-apple-darwin` tarball (native host build) | Also does the daemon/TUI smoke test |
-
-Artifacts are **staged and uploaded from the Linux box** — it can build
-everything except the macOS tarball, so the macOS tarball is copied to it
-before upload (see [Phase 4](#phase-4--assemble-and-upload)).
+One release conductor drives all three. The binary artifacts for all shipped
+platforms are built **on GitHub Actions** by `.github/workflows/release.yml`
+(see [CI builds](#ci-builds-github-actions)): pushing the `vX.Y.Z` tag builds
+every platform and creates the GitHub release with the combined
+`SHA256SUMS`. The two-machine build/upload flow is no longer part of the
+normal path — it is documented in condensed form in the
+[appendix](#appendix--manual-build--upload-fallback) for releases from
+machines without push access (rare; it also covers what CI does not, namely
+nothing — the channel updates are conductor tasks in every case).
 
 ---
 
@@ -43,11 +34,13 @@ artifact naming, and smoke tests stay in the scripts — the workflow only adds
 per-runner toolchain setup and artifact plumbing. `choreo-gui` (a stub) is
 built nowhere.
 
-**Triggers** (deliberately narrow — full 4-platform builds are expensive):
+**Triggers** (deliberately narrow — full multi-platform builds are expensive):
 
 - **`v*` tag push** — builds everything, then creates the GitHub release with
   all artifacts and one combined `SHA256SUMS`. The release job guards that the
-  pushed tag matches the manifest version.
+  pushed tag matches the manifest version, extracts the version's
+  `CHANGELOG.md` section for the release body, and creates the release with
+  all artifacts and one combined `SHA256SUMS`.
 - **`workflow_dispatch`** — identical builds, but **no release is created**;
   artifacts attach to the workflow run (default 90-day retention). This is
   how the pipeline itself is tested without spamming tags.
@@ -58,6 +51,24 @@ built nowhere.
 | `macos-arm64` | macos-latest | native `aarch64-apple-darwin` tarball (via `scripts/release.sh`) |
 | `windows-msvc` | windows-latest | `x86_64-pc-windows-msvc` zip of the shipped `.exe` files |
 | `android-termux` | ubuntu-latest + NDK | `aarch64-linux-android` Termux tarball (via `scripts/build-android.sh --features metrics,blockchain`) + the Termux-native `.deb` (via `scripts/build-deb-termux.sh`, structural smoke-test on the runner; the packaged binaries are then extracted with Termux's own dpkg-deb under qemu-user and executed against an unpacked Termux aarch64 rootfs — see the workflow's qemu step) |
+| `ios-build` | macos-latest | **none** — `choreo-gui` (the only crate that ships to iOS) compile check for both iOS targets, the real Xcode app link via the `ios/` scaffold, and a non-blocking simulator boot smoke (`continue-on-error` until the plumbing has proven stable). Deliberately not part of the release; a failing link is diagnosed from the log |
+
+Every build job smoke-tests its own artifact beyond the clap surface:
+the three desktop jobs run `scripts/daemon-smoke.sh` (boots the shipped
+daemon hermetically — scratch socket + config dir — and proves the listener
+comes up), and the android job **executes** its binaries under qemu-user
+against the official Termux aarch64 rootfs (skopeo fetches the image layers;
+no docker), closing the "never executed before release" gap.
+
+The `release` job (tag pushes only) downloads all build-job artifacts,
+generates one combined `SHA256SUMS` over everything, guards that the pushed
+tag matches the manifest version, extracts the version's section from
+`CHANGELOG.md` (the Keep a Changelog promotion from Phase 1 makes it the
+release body — a missing section fails the job), and creates the release
+with `gh release create vX.Y.Z dist/* --notes-file … --generate-notes`. A
+re-run after the release already exists fails on create — assets are
+immutable once uploaded; delete and re-create per the
+[Hotfix / rollback](#hotfix--rollback) section rather than editing the job.
 
 Every job builds the same shipped binaries (`choreographr choreo-tui` — the
 `choreo-im`/`choreo-acp` bridges are feature-gated and excluded from release
@@ -66,12 +77,10 @@ smoke-tests its artifact, and uploads it; the `release` job only runs for tag
 pushes. Windows/Termux artifacts ship **in addition to** the Homebrew/AUR
 channels — those package the same tarballs CI produces.
 
-How this slots into the SOP: push the `vX.Y.Z` tag (Phase 1) **after** the
+How this slots into the SOP: push the `vX.Y.Z` tag (Phase 3) **after** the
 crates.io publish (Phase 2) — the tag push both publishes binaries and is the
-release trigger — then verify the release page (Phase 4's gate) and do the
-countdown tasks in Phase 5/6 as before. Phases 3–4's manual build/upload steps
-below remain documented for releases from machines without push access and as
-the offline fallback.
+release trigger — then verify the release page (Phase 3's gate) and do the
+channel updates in Phase 4 as before.
 
 ---
 
@@ -94,19 +103,11 @@ git checkout master && git pull --ff-only origin master
 # 2. Full quality gate — fmt, clippy (warnings denied), unit + integration.
 just ci
 
-# 3. Toolchain present on the build machines you'll use:
-#    Linux box:  zig, cargo-zigbuild, gh, (dpkg-deb, rpmbuild optional)
-#    MacBook:    zig, gh
-#    (Both also need a STABLE rust toolchain: `just release` builds the dist
-#    binaries on stable Rust via scripts/build-stable.sh — `rustup toolchain
-#    install stable` if it isn't the rustup default.)
+# 3. Tooling the conductor runs locally (Phases 1–5): gh, jq, git.
+#    The per-platform build toolchains (zig, cargo-zigbuild, NDK) live in the
+#    CI workflow — no local setup is needed unless you are using the manual
+#    fallback in the appendix.
 just preflight               # checks cargo + zig, notes nextest
-#
-# Note: `just release` raises the fd soft limit itself (release.sh runs
-# `ulimit -n 65536` — linking the four large binaries can open thousands of
-# files and die with ProcessFdQuotaExceeded at the default 1024). If your
-# shell refuses the raise, run it under a raised limit:
-# `ulimit -n 65536 && just release`.
 ```
 
 ---
@@ -115,7 +116,9 @@ just preflight               # checks cargo + zig, notes nextest
 
 1. **Decide the level** — the release conductor's judgment call, made before
    any tooling runs. There are only three options; which one applies is
-   determined by what changed since the last tag:
+   determined by what changed since the last tag (the `CHANGELOG.md`
+   `[Unreleased]` section is the working evidence — keep it current as
+   features land):
 
    | Level | Bump | When to pick it |
    |---|---|---|
@@ -129,7 +132,7 @@ just preflight               # checks cargo + zig, notes nextest
    `patch`. The inter-crate requirements flip from `"0.1"` (which Cargo reads
    as `< 0.2`) to `"1"` (`< 2`), so `dependent-version = "fix"` stops
    rewriting manifests on ordinary releases and only fires on a major. Update
-   this table's examples when 1.0.0 ships (Phase 6 commits doc drift).
+   this table's examples when 1.0.0 ships (Phase 5 commits doc drift).
 
 2. **Enact the decision** — the command that carries it out is
    `cargo release version <level>`, where `<level>` is replaced with the
@@ -147,11 +150,14 @@ just preflight               # checks cargo + zig, notes nextest
    ```
 
    `cargo release version` only edits the manifests — it does **not** commit
-   or tag. Commit the bump together with any user-facing docs that state a
-   version or install command (README install section):
+   or tag. Before committing: promote the changelog section — rename
+   `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` in `CHANGELOG.md` (and
+   start a fresh empty `[Unreleased]` above it, moving the compare link),
+   plus update any user-facing docs that state a version or install command
+   (README install section):
 
    ```bash
-   git add Cargo.toml Cargo.lock README.md   # + any other docs touched
+   git add Cargo.toml Cargo.lock README.md CHANGELOG.md   # + any other docs touched
    git commit -m "release: bump to X.Y.Z"
    ```
 
@@ -161,6 +167,11 @@ just preflight               # checks cargo + zig, notes nextest
 
 3. **Tag name check:** confirm no tag `vX.Y.Z` exists yet:
    `git ls-remote --tags origin | grep vX.Y.Z`.
+
+   > **Why the changelog section must exist at the tag:** the CI `release`
+   > job extracts the `## [X.Y.Z]` section from `CHANGELOG.md` for the
+   > release body and fails the job if it is absent — the curated notes are
+   > the release notes, not an afterthought.
 
 4. **Tag the bump commit** (cargo-release reads the version back from
    `Cargo.toml`): `cargo release tag -x` → creates `vX.Y.Z` at HEAD. The tag
@@ -177,8 +188,8 @@ just preflight               # checks cargo + zig, notes nextest
 ## Phase 2 — Publish crates to crates.io
 
 Runs **before** any binary building (binaries are versioned by the same
-bump, and `cargo install` must resolve the published crates). From either
-machine, on the clean tree:
+bump, and `cargo install` must resolve the published crates), on a clean
+tree:
 
 0. **Sync the MSRV claim first.** Dependency resolution is MSRV-unconstrained
    (`resolver.incompatible-rust-versions = "allow"` in `.cargo/config.toml`),
@@ -204,7 +215,7 @@ into the uploaded `.crate`. A published manifest that still contains
 `[profile.*] rustflags` **hard-breaks stable `cargo install`** (verified: stable
 cargo errors with "The package requires the Cargo feature called
 `profile-rustflags`") — which would kill the crates.io install route this SOP
-verifies in Phase 6. The wrapper strips exactly those keys (plus the
+verifies in Phase 5. The wrapper strips exactly those keys (plus the
 `[unstable]` config opt-in) while `cargo release` runs and restores them on
 exit, so the published source builds at the target's default CPU on stable,
 exactly like the dist binaries.
@@ -246,7 +257,8 @@ in `--workspace` selection, despite the GUI crate's manifest flag.
   it bumped. Exact subcommand/flags vary by cargo-release version —
   `cargo release --help` for the installed one.
 - Push the bump commit and the `vX.Y.Z` tag created in Phase 1:
-  `git push origin master --tags`.
+  `git push origin master --tags`. **This tag push is also the CI build
+  trigger** — see Phase 3.
 - Verify the published suite installs cleanly from source in a scratch
   `CARGO_HOME` (needs `zig` on PATH — zlob's `build.rs`):
 
@@ -302,130 +314,48 @@ a scratch CARGO_HOME, tag `vX.Y.Z` pushed.
 
 ---
 
-## Phase 3 — Build binaries (two machines, or CI on tag push)
+## Phase 3 — CI build & GitHub release (tag push)
 
-> **CI path:** pushing the `vX.Y.Z` tag triggers `.github/workflows/release.yml`,
-> which builds the musl/macOS/Windows/Termux artifacts (including the desktop
-> `.deb`/`.rpm` and the Termux `.deb`), smoke-tests them, and creates the
-> GitHub release automatically
-> (see [CI builds](#ci-builds-github-actions)). The manual flow below remains
-> the fallback; CI also runs `scripts/daemon-smoke.sh` on the desktop
-> artifacts, so the macOS daemon smoke test here is a belt-and-suspenders
-> repeat rather than a CI gap.
+The `vX.Y.Z` tag pushed in Phase 2 is the build trigger. Nothing to run
+locally — `.github/workflows/release.yml` builds every platform, smoke-tests
+each artifact, and creates the GitHub release automatically (job table and
+details in [CI builds](#ci-builds-github-actions)).
 
-Both machines run the same dry-run flow. `scripts/release.sh`:
+Conductor duties while the workflow runs:
 
-- builds the shipped binaries on **stable** Rust (each cargo build runs through
-  `scripts/build-stable.sh`, reproducible and matching the crates.io/MSRV
-  story; see the README build notes) under the workspace's dedicated
-  `[profile.dist]` profile — `--profile dist`, not `--release` — so the
-  shipped artifacts land in `target/<triple>/dist/`, separate from any local
-  `cargo build --release` output the packaging steps could otherwise pick up
-  by mistake (see root `Cargo.toml`),
-- builds every artifact at an explicit **CPU floor per target** via
-  `RUSTFLAGS="-C target-cpu=…"` (see ARCHITECTURE.md "Release & packaging"):
-  x86-64-v2 for the musl tarball, the target default (`apple-a14`) for macOS,
-  baseline for the `.deb`/`.rpm` — the local `-C target-cpu=native` profile
-  flags (and the nightly `-Z…` flags) are additionally stripped by
-  `scripts/build-stable.sh` before each stable build, so the build machine's
-  CPU can never leak into a shipped artifact,
-- reads the version from `Cargo.toml`,
-- guards against a dirty tree,
-- builds with `--features metrics,blockchain` (the metrics endpoint stays
-available as the README advertises, and the EVM/Substrate blockchain tools ship
-in the released binaries; the native PDF tools are unconditional since
-`pdf-inspector` became a plain registry dependency in 1.15.0),
-- writes the tarball + `SHA256SUMS` (covering everything already in `dist/`
-  for this version) into `dist/`,
-- builds `.deb`/`.rpm` best-effort (Linux only, host glibc, no mimalloc),
-- prints the `gh release create` command and the post-publish checklist.
+1. **Watch the run** (`gh run watch` on the `release` workflow) — the four
+   build jobs must all go green. The `ios-build` job may report its
+   (non-blocking) smoke result; investigate a failure in the log, but it
+   does not hold the release.
+2. **Verify the release page** once the `release` job completes:
+   - the tag on the release matches `vX.Y.Z` and the manifest version
+     (the job guards this too — a guard failure means a Phase 1/2 mistake);
+   - all assets are present: three tarballs (musl, macOS, Android Termux),
+     the Windows `.zip`, the desktop `.deb` and `.rpm`, the Termux-native
+     `.deb`, and the combined `SHA256SUMS`;
+   - each asset downloads.
 
-### 3a. Linux x86_64 box
-
-```bash
-just release            # dry-run: musl tarball + SHA256SUMS + .deb + .rpm
-just smoke-test         # extract tarball; verify 4 binaries, --version, --help
-```
-
-Confirm `dist/` contains:
-
-```
-choreographr-<V>-x86_64-unknown-linux-musl.tar.gz   # static musl + mimalloc
-choreographr-<V>-x86_64.deb
-choreographr-<V>-x86_64.rpm
-SHA256SUMS
-```
-
-### 3b. M1 MacBook
-
-```bash
-just release            # dry-run: aarch64 tarball + SHA256SUMS (no .deb/.rpm)
-just smoke-test
-```
-
-Then the **manual daemon smoke test** (the tarball smoke test only checks
-`--version`/`--help`):
-
-1. Extract the tarball, run `./choreographr` — confirm the socket
-   (`/tmp/Choreographr.sock`) and keystore initialize.
-2. Load the bundled `com.choreographr.daemon.plist` in a throwaway launch
-   agents dir; confirm the daemon starts and logs to `/tmp/choreographr.log`.
-3. Run `./choreo-tui` and complete one round-trip with a configured account.
-
-**Gate:** both machines' tarballs pass `scripts/smoke-test.sh`; macOS daemon
-smoke test passes. Keep the macOS tarball — it's needed in Phase 4.
+**Gate:** workflow green, release page lists all assets + `SHA256SUMS`,
+assets download.
 
 ---
 
-## Phase 4 — Assemble & upload (Linux box)
-
-GitHub uploads happen **once, from the Linux box**, so all assets land in one
-release:
-
-```bash
-scp macbook:…/choreographr-<V>-aarch64-apple-darwin.tar.gz dist/
-just smoke-test         # re-validate on the Linux box for good measure
-just release-upload     # regenerates a combined SHA256SUMS over ALL dist/ artifacts
-                        # (host tarball + staged macOS tarball + .deb/.rpm) and
-                        # uploads every tarball it finds + SHA256SUMS + .deb/.rpm
-```
-
-`scripts/release.sh` regenerates `SHA256SUMS` from the `choreographr-<V>-*`
-glob **after** the `.deb`/`.rpm` step and assembles the upload list from every
-tarball present in `dist/` — so staging the macOS tarball first is what makes
-the uploaded checksum file complete and the macOS asset appear in the release.
-
-Equivalent manual form (what `--upload` assembles):
-
-```bash
-gh release create vX.Y.Z \
-  dist/choreographr-X.Y.Z-x86_64-unknown-linux-musl.tar.gz \
-  dist/choreographr-X.Y.Z-aarch64-apple-darwin.tar.gz \
-  dist/choreographr-X.Y.Z-x86_64.deb \
-  dist/choreographr-X.Y.Z-x86_64.rpm \
-  dist/SHA256SUMS \
-  --title "choreographr X.Y.Z" --generate-notes
-```
-
-**Gate:** release page lists all five assets + `SHA256SUMS`; assets download.
-
----
-
-## Phase 5 — Channel updates
+## Phase 4 — Channel updates
 
 ### Homebrew tap (`choreographr/homebrew-choreographr`)
 
-Run the tap updater on the Linux box — after Phase 4, so the macOS tarball
-is staged in `dist/`:
+Run the tap updater from a `dist/` holding the release's tarballs — with the
+CI path, download them from the release first (the updater hashes the exact
+artifacts that were uploaded; it does not re-download to compare):
 
 ```bash
+gh release download vX.Y.Z -p 'choreographr-*.tar.gz' -D dist/
 scripts/update-homebrew-tap.sh            # dry-run: shows the diff, pushes nothing
 scripts/update-homebrew-tap.sh --push     # commit + push to the tap repo
 ```
 
 `scripts/update-homebrew-tap.sh` reads the version from `Cargo.toml`,
-recomputes both `sha256` digests from the `dist/` tarballs (no re-download —
-it hashes the exact artifacts that were uploaded), rewrites
+recomputes both `sha256` digests from the `dist/` tarballs, rewrites
 `Formula/choreographr.rb` in `choreographr/homebrew-choreographr` (version,
 both `url` lines, both digests), validates the result (exact-count rewrite
 checks, no stale version/placeholder, `ruby -c` syntax check when ruby is
@@ -434,14 +364,14 @@ default branch. The x86_64 branch is left untouched when no
 `choreographr-<V>-x86_64-apple-darwin.tar.gz` is in `dist/` (Intel macOS is
 not shipped yet — the branch stays a placeholder).
 
-The one step that stays manual, on the MacBook (Homebrew is macOS-only):
+The one step that stays manual, on a Mac (Homebrew is macOS-only):
 
 ```bash
 brew install ./choreographr.rb && choreographr --version
 ```
 
 …then commit the mirrored-formula drift in this repo
-(`packaging/homebrew/choreographr.rb`) during Phase 6.
+(`packaging/homebrew/choreographr.rb`) during Phase 5.
 
 Manual fallback (what the script automates — only when the script cannot be
 run):
@@ -470,15 +400,15 @@ Edit `packaging/aur/PKGBUILD`:
 1. Publish `scripts/install.sh` (or a per-version
    `install/vX.Y.Z.sh` and repoint `install.sh` — keep the versioned URL
    scheme from day one).
-2. Add `/download/vX.Y.Z/…` 302 redirects for each asset (tarballs, `.deb`,
-   `.rpm`) → the GitHub release URLs.
+2. Add `/download/vX.Y.Z/…` 302 redirects for each asset (tarballs, Windows
+   `.zip`, `.deb`, `.rpm`, Termux `.deb`) → the GitHub release URLs.
 3. Publish `/releases/SHA256SUMS` (the combined file).
 
 **Gate:** every channel's `--version` reports `X.Y.Z`.
 
 ---
 
-## Phase 6 — Post-release verification
+## Phase 5 — Post-release verification
 
 Exercise every install route from a clean environment:
 
@@ -490,24 +420,25 @@ Exercise every install route from a clean environment:
 | AUR | `choreographr-bin` | installs, `choreographr --version` |
 | curl installer | `curl -fsSL https://choreographr.com/install.sh \| sh` | sha256-verified extract |
 | .deb / .rpm | `dpkg -i` / `dnf install` on clean distro VMs | installs; unit present, **not enabled** |
+| Termux | `dpkg -i` the Termux-native `.deb` on a device | installs; binaries run under Termux's $PREFIX |
 
 Confirm the service policy held everywhere: the systemd unit / launchd agent
 is installed but **never auto-enabled** — `systemctl --user enable --now
 choreographr` / `launchctl load …` remain explicit user actions.
 
-Finally, on the Linux box, commit any post-release doc/version drift in this
-repo and push.
+Finally, commit any post-release doc/version drift in this repo and push.
 
 ---
 
 ## Hotfix / rollback
 
 - **Bad crates.io publish:** yanking is a last resort (breaks `--locked`
-  installs). Prefer publishing an immediate patch (Phases 2–6) — crates.io
+  installs). Prefer publishing an immediate patch (Phases 1–5) — crates.io
   treats versions as immutable, so the patch **is** the fix.
 - **Bad GitHub release:** `gh release delete vX.Y.Z` then re-create after
   fixing; assets are immutable once uploaded, so re-create with corrected
-  artifacts.
+  artifacts (re-pushing the tag re-triggers the CI build — the `release` job
+  fails on an existing release, so delete the release first).
 - **Channel rollback:** Homebrew — revert the tap commit; AUR — bump `pkgrel`
   (`pkgrel=2`) or revert and push; choreographr.com — point redirects at the
   previous version (the versioned URL scheme makes this a one-line change).
@@ -520,15 +451,112 @@ repo and push.
 
 - [ ] `just ci` green; tree clean; master pulled
 - [ ] MSRV sync: `cargo metadata --format-version 1 | jq -r '[.packages[].rust_version | select(. != null)] | sort_by(split(".") | map(tonumber)) | last'` → update `rust-version` in `[workspace.package]` (with `Cargo.lock`) if changed
+- [ ] `CHANGELOG.md`: move entries from `[Unreleased]` into a new `## [X.Y.Z] - YYYY-MM-DD` section (fresh empty `[Unreleased]` + compare link above it)
 - [ ] `cargo release version <level> -x` (level from Phase 1) → bump committed with doc updates; `cargo release tag -x` → `vX.Y.Z`
 - [ ] `./scripts/publish-stable.sh publish --workspace` → 14 crates on crates.io; `cargo install --locked` verified
 - [ ] First release only: 12 new crates staged in ≤5-crate batches (or crates.io burst override) — see Phase 2; the next release adds `choreo-blockchain` and `choreo-sanitize` as new crates
-- [ ] Linux box: `just release` + `just smoke-test` → musl tarball, `.deb`, `.rpm`, `SHA256SUMS`
-- [ ] MacBook: `just release` + `just smoke-test` + daemon/keystore/plist/TUI smoke test
-- [ ] macOS tarball copied to Linux box; combined `SHA256SUMS` regenerated
-- [ ] `just release-upload` → `gh release create vX.Y.Z` with all 5 assets
-- [ ] `scripts/update-homebrew-tap.sh --push` run (tap formula bumped from `dist/`, pushed); `brew install` verified on the MacBook
+- [ ] Push the bump commit + `vX.Y.Z` tag → CI builds all platforms and creates the GitHub release; verify the release page lists every asset + `SHA256SUMS` and they download
+- [ ] `gh release download vX.Y.Z -p 'choreographr-*.tar.gz' -D dist/`, then `scripts/update-homebrew-tap.sh --push`; `brew install` verified on a Mac
 - [ ] AUR `pkgver`/`sha256sums` bumped, `.SRCINFO` regenerated, pushed
 - [ ] choreographr.com: `install.sh`, `/download/vX.Y.Z/` redirects, `/releases/SHA256SUMS`
-- [ ] All install routes verified (`cargo install`/`binstall`, brew, AUR, curl, .deb, .rpm)
+- [ ] All install routes verified (`cargo install`/`binstall`, brew, AUR, curl, .deb, .rpm, Termux)
 - [ ] Service policy confirmed: installed, never auto-enabled
+
+---
+
+## Appendix — manual build & upload fallback
+
+Only for releases from machines without push access to trigger CI (the
+normal path is [Phase 3](#phase-3--ci-build--github-release-tag-push)). Both
+desktop machines run `scripts/release.sh`, which:
+
+- builds the shipped binaries on **stable** Rust (each cargo build runs through
+  `scripts/build-stable.sh`, reproducible and matching the crates.io/MSRV
+  story; see the README build notes) under the workspace's dedicated
+  `[profile.dist]` profile — `--profile dist`, not `--release` — so the
+  shipped artifacts land in `target/<triple>/dist/`, separate from any local
+  `cargo build --release` output the packaging steps could otherwise pick up
+  by mistake (see root `Cargo.toml`),
+- builds every artifact at an explicit **CPU floor per target** via
+  `RUSTFLAGS="-C target-cpu=…"` (see ARCHITECTURE.md "Release & packaging"):
+  x86-64-v2 for the musl tarball, the target default (`apple-a14`) for macOS,
+  baseline for the `.deb`/`.rpm` — the local `-C target-cpu=native` profile
+  flags (and the nightly `-Z…` flags) are additionally stripped by
+  `scripts/build-stable.sh` before each stable build, so the build machine's
+  CPU can never leak into a shipped artifact,
+- reads the version from `Cargo.toml`,
+- guards against a dirty tree,
+- builds with `--features metrics,blockchain`,
+- writes the tarball + `SHA256SUMS` (covering everything already in `dist/`
+  for this version) into `dist/`,
+- builds `.deb`/`.rpm` best-effort (Linux only, host glibc, no mimalloc),
+- prints the `gh release create` command and the post-publish checklist.
+
+The manual flow needs one **Linux x86_64 box** (musl tarball — static,
+mimalloc — plus `.deb`/`.rpm`; needs `cargo-zigbuild`, optional
+`dpkg-deb`/`rpmbuild`) and one **M1 MacBook** (native aarch64 tarball).
+Artifacts are staged and uploaded from the Linux box — the macOS tarball is
+copied there before upload. Windows and Android/Termux artifacts have no
+manual path; if CI is unavailable for them, skip those assets for the
+release or wait for CI (a re-pushed tag after `gh release delete` re-triggers
+it).
+
+### Linux x86_64 box
+
+```bash
+just release            # dry-run: musl tarball + SHA256SUMS + .deb + .rpm
+just smoke-test         # extract tarball; verify 4 binaries, --version, --help
+```
+
+Confirm `dist/` contains the musl tarball, `.deb`, `.rpm`, and `SHA256SUMS`.
+
+### M1 MacBook
+
+```bash
+just release            # dry-run: aarch64 tarball + SHA256SUMS (no .deb/.rpm)
+just smoke-test
+```
+
+Then the **manual daemon smoke test** (the tarball smoke test only checks
+`--version`/`--help`; CI's `scripts/daemon-smoke.sh` covers this normally):
+
+1. Extract the tarball, run `./choreographr` — confirm the socket
+   (`/tmp/Choreographr.sock`) and keystore initialize.
+2. Load the bundled `com.choreographr.daemon.plist` in a throwaway launch
+   agents dir; confirm the daemon starts and logs to `/tmp/choreographr.log`.
+3. Run `./choreo-tui` and complete one round-trip with a configured account.
+
+### Assemble & upload (Linux box)
+
+GitHub uploads happen **once, from the Linux box**, so all assets land in one
+release:
+
+```bash
+scp macbook:…/choreographr-<V>-aarch64-apple-darwin.tar.gz dist/
+just smoke-test         # re-validate on the Linux box for good measure
+just release-upload     # regenerates a combined SHA256SUMS over ALL dist/ artifacts
+                        # (host tarball + staged macOS tarball + .deb/.rpm) and
+                        # uploads every tarball it finds + SHA256SUMS + .deb/.rpm
+```
+
+`scripts/release.sh` regenerates `SHA256SUMS` from the `choreographr-<V>-*`
+glob **after** the `.deb`/`.rpm` step and assembles the upload list from every
+tarball present in `dist/` — so staging the macOS tarball first is what makes
+the uploaded checksum file complete and the macOS asset appear in the release.
+
+Equivalent manual form (what `--upload` assembles):
+
+```bash
+gh release create vX.Y.Z \
+  dist/choreographr-X.Y.Z-x86_64-unknown-linux-musl.tar.gz \
+  dist/choreographr-X.Y.Z-aarch64-apple-darwin.tar.gz \
+  dist/choreographr-X.Y.Z-x86_64.deb \
+  dist/choreographr-X.Y.Z-x86_64.rpm \
+  dist/SHA256SUMS \
+  --title "choreographr X.Y.Z" \
+  --notes-file <(awk -v ver="X.Y.Z" '$0 == "## [" ver "]" {f=1; next} f && /^## /{exit} f{print}' CHANGELOG.md) \
+  --generate-notes
+```
+
+**Gate:** release page lists the five manual-flow assets + `SHA256SUMS`;
+assets download.

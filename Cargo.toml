@@ -286,7 +286,9 @@ choreo-keystore = { path = "choreo-keystore", version = "0.1" }
 choreo-proto = { path = "choreo-proto", version = "0.1" }
 choreo-sanitize = { path = "choreo-sanitize", version = "0.1" }
 choreo-image = { path = "choreo-image", version = "0.1" }
-choreo-im = { path = "choreo-im", version = "0.1" }
+# Not in [workspace.dependencies]: the root crate is the only consumer, and
+# workspace dependencies cannot be `optional = true` — the feature-gated root
+# dependency below needs it optional (`--features im`).
 choreo-markdown = { path = "choreo-markdown", version = "0.1" }
 choreo-mcp = { path = "choreo-mcp", version = "0.1" }
 choreo-transport = { path = "choreo-transport", version = "0.1" }
@@ -376,10 +378,6 @@ hex = "0.4"
 # that BOTH choreo-blockchain (the `blockchain` feature) and choreo-content (the
 # always-on Coordination Platform tools) use it.
 subxt = { version = "0.50", default-features = false, features = ["native", "jsonrpsee", "runtime"] }
-# sr25519 signing + Polkadot-JS keystore compat — used by choreo-keystore for
-# the Polkadot account store (the `polkadot-js-compat` feature pulls scrypt,
-# crypto_secretbox, and schnorrkel transitively).
-subxt-signer = { version = "0.50.3", default-features = false, features = ["polkadot-js-compat", "subxt"] }
 # Protobuf content protocol (choreo-content's ItemMessage/mixin encoding).
 prost = "0.14"
 # SCALE encoding for deterministic item-id derivation (choreo-content).

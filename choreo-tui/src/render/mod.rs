@@ -365,7 +365,7 @@ fn render_chat(frame: &mut Frame<'_>, app: &mut App) {
     }
 
     if has_session {
-        // Session-identity values (wd, provider, model, reasoning) — stable
+        // Session-identity values (wd, account, model, reasoning) — stable
         // across the session — go first (left side) so the bar's leading edge
         // stays fixed.  Runtime metrics (tokens, context fill) follow on the
         // right where their per-turn updates don't shift the identity fields.
@@ -373,7 +373,7 @@ fn render_chat(frame: &mut Frame<'_>, app: &mut App) {
             .active_display_ref()
             .and_then(|d| d.working_dir.as_deref())
             .unwrap_or("-");
-        let provider = app.attached_provider_slug.as_deref().unwrap_or("-");
+        let account = app.attached_account_slug.as_deref().unwrap_or("-");
         let model = app
             .active_display_ref()
             .and_then(|d| d.selected_model.as_deref())
@@ -425,7 +425,7 @@ fn render_chat(frame: &mut Frame<'_>, app: &mut App) {
         // Tool groups can change at runtime via load_tools/unload_tools.
         let tool_groups = app.attached_tool_groups.join(", ");
 
-        // Order: stable identity first (wd, provider, model, reasoning) so
+        // Order: stable identity first (wd, account, model, reasoning) so
         // the bar doesn't visually jitter when per-turn metrics appear or
         // disappear; tools in the middle; runtime metrics (tokens, context
         // window fill, active status) on the right.
@@ -433,7 +433,7 @@ fn render_chat(frame: &mut Frame<'_>, app: &mut App) {
         spans.push(Span::raw(" "));
         spans.push(Span::styled(wd, Style::default().fg(Color::White)));
         spans.push(Span::raw(" | "));
-        spans.push(Span::styled(provider, Style::default().fg(Color::White)));
+        spans.push(Span::styled(account, Style::default().fg(Color::White)));
         spans.push(Span::raw(" | "));
         spans.push(Span::styled(model, Style::default().fg(Color::White)));
         spans.push(Span::raw(" | "));

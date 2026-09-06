@@ -90,6 +90,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- TUI status bar shows the attached session's account slug instead of the
+  inference provider slug.
 - Protocol rework: `DaemonMessage` split into a `SessionEvent` bus behind a
   `session_id` envelope (`Option<u64>`, replacing the `session_id: 0`
   sentinel) with explicit broadcast-origin provenance.

@@ -350,7 +350,10 @@ pub(crate) struct App {
     pub(crate) quit_message: Option<String>,
     pub(crate) image_job_tx: Option<crossbeam::channel::Sender<ImageJob>>,
     pub(crate) attached_session_id: Option<u64>,
-    pub(crate) attached_provider_slug: Option<String>,
+    /// Account slug shown in the status bar — the attached session's account
+    /// name (the account name is its slug). Replaces the inference provider
+    /// slug that used to be shown here.
+    pub(crate) attached_account_slug: Option<String>,
     pub(crate) attached_status: Option<SessionStatus>,
     pub(crate) attached_tool_groups: Vec<String>,
     /// Persistent latch of whether the daemon's credential keystore is locked.
@@ -523,7 +526,7 @@ impl App {
             image_job_tx: None,
             pending_job_idx: HashMap::new(),
             attached_session_id: None,
-            attached_provider_slug: None,
+            attached_account_slug: None,
             attached_status: None,
             attached_tool_groups: Vec::new(),
             // Assume locked until the daemon tells us otherwise (via the
@@ -1398,23 +1401,21 @@ impl App {
             }
         }
         self.attached_status = status;
-        self.refresh_attached_provider_slug();
+        self.refresh_attached_account_slug();
         self.show_ctrl_help = true;
         if let Some(d) = self.active_display() {
             d.progress_dirty = true;
         }
     }
 
-    pub(crate) fn refresh_attached_provider_slug(&mut self) {
-        self.attached_provider_slug = self.active_display_ref().and_then(|d| {
-            d.account_name.as_ref().and_then(|name| {
-                self.ai_providers
-                    .accounts
-                    .iter()
-                    .find(|a| a.name == *name)
-                    .map(|a| a.provider.clone())
-            })
-        });
+    /// The account slug shown in the status bar: the attached session's
+    /// account name (the account name is the slug users enter when creating
+    /// one). Previously this showed the inference provider slug resolved via
+    /// the accounts list, but the account itself is the more useful identity.
+    pub(crate) fn refresh_attached_account_slug(&mut self) {
+        self.attached_account_slug = self
+            .active_display_ref()
+            .and_then(|d| d.account_name.clone());
     }
 
     pub(crate) fn attached_session_mut(&mut self) -> Option<&mut SessionSummary> {
@@ -1502,10 +1503,10 @@ impl App {
         if let Some(s) = self.mirror_to_attached_summary(session_id) {
             s.account_name = Some(account.to_owned());
         }
-        // Refresh the status-bar provider slug only for the attached session
+        // Refresh the status-bar account slug only for the attached session
         // (it reads the display account name set above).
         if self.attached_session_id == Some(session_id) {
-            self.refresh_attached_provider_slug();
+            self.refresh_attached_account_slug();
         }
     }
 
@@ -1750,7 +1751,7 @@ impl App {
 
     pub(crate) fn handle_accounts(&mut self, accounts: &[AccountInfo]) {
         self.ai_providers.set_accounts(accounts.to_vec());
-        self.refresh_attached_provider_slug();
+        self.refresh_attached_account_slug();
     }
 
     pub(crate) fn handle_sessions(
@@ -1836,7 +1837,7 @@ impl App {
         if self.attached_session_id == Some(session_id) {
             self.attached_session_id = None;
             self.active_session_id = None;
-            self.attached_provider_slug = None;
+            self.attached_account_slug = None;
             // The deleted session's unsent prompt dies with it — the display
             // (and its draft) are gone above, so drop the input bar too
             // rather than leak the orphaned text into whichever session gets
